@@ -10,8 +10,14 @@ os dois são JWT e trazem a validade no campo `exp`. Toda chamada leva o
 `User-Agent` com o nome da aplicação e um e-mail de contato técnico: o Melhor
 Envio exige. Limite de 250 requisições por minuto por usuário.
 
-Referência: https://docs.melhorenvio.com.br (cálculo de fretes atualizado em
-18/06/2026, conferido em 05/10/2026).
+Compra de etiqueta: carrinho (`/me/cart`), pagamento com o saldo da carteira
+(`/me/shipment/checkout`), geração (`/me/shipment/generate`), PDF
+(`/me/imprimir/pdf/<id>`). Rastreio pelo status da etiqueta
+(`/me/shipment/tracking`) e cancelamento (`/me/shipment/cancel`).
+
+Referência: https://docs.melhorenvio.com.br (cálculo, carrinho, compra,
+geração, impressão, status e cancelamento atualizados em 18/06/2026,
+conferidos em 05/10/2026).
 """
 import base64
 import json
@@ -35,6 +41,13 @@ QUOTE_TIMEOUT = 10
 # O checkout cota cada método separadamente, e cada mudança no carrinho cota de
 # novo. Dois métodos do Melhor Envio (econômico e expresso) mandam o mesmo
 # pedido: a resposta traz todos os serviços, então a segunda cotação sai daqui.
+# Bairro pelo CEP, quando o endereço não tem: o checkout não pede bairro, e a
+# compra da etiqueta exige.
+VIACEP_URL = "https://viacep.com.br/ws/%s/json/"
+
+# Motivo de cancelamento: a documentação manda usar sempre 2.
+CANCEL_REASON = "2"
+
 QUOTE_CACHE_TTL_S = 600
 QUOTE_CACHE_MAX = 256
 _QUOTE_CACHE = {}
@@ -74,6 +87,21 @@ def token_expiry(token):
         return datetime.fromtimestamp(int(exp), tz=timezone.utc).replace(tzinfo=None)
     except (ValueError, TypeError, AttributeError):
         return None
+
+
+def district_for_postal_code(postal_code, timeout=10):
+    """Bairro do CEP pelo ViaCEP, ou "" (CEP geral de cidade pequena não tem)."""
+    cep = digits(postal_code)
+    if len(cep) != 8:
+        return ""
+    try:
+        data = requests.get(VIACEP_URL % cep, timeout=timeout).json()
+    except (requests.RequestException, ValueError):
+        _logger.info("Melhor Envio: ViaCEP não respondeu para %s", cep)
+        return ""
+    if not isinstance(data, dict) or data.get("erro"):
+        return ""
+    return (data.get("bairro") or "").strip()
 
 
 def _to_float(value):
@@ -154,7 +182,8 @@ class MelhorEnvioClient:
         try:
             data = response.json() if response.content else {}
         except ValueError:
-            data = {}
+            # o PDF da etiqueta vem como o endereço do arquivo, às vezes sem aspas
+            data = (response.text or "").strip()
 
         if response.status_code == 401:
             raise MelhorEnvioError(
@@ -173,16 +202,26 @@ class MelhorEnvioClient:
         return data
 
     @staticmethod
+    def _flatten(value):
+        if isinstance(value, dict):
+            return [texto for item in value.values() for texto in MelhorEnvioClient._flatten(item)]
+        if isinstance(value, (list, tuple)):
+            return [texto for item in value for texto in MelhorEnvioClient._flatten(item)]
+        return [str(value)] if value not in (None, "") else []
+
+    @staticmethod
     def _error_detail(data):
-        """Texto do erro. A validação (422) vem no formato do Laravel:
-        `message` genérico e `errors` com a lista de mensagens por campo."""
+        """Texto do erro. A validação (422) vem no formato do Laravel: `message`
+        genérico e `errors` com a lista de mensagens por campo. O carrinho usa
+        `error`, com listas aninhadas por volume."""
         if not isinstance(data, dict):
             return ""
-        erros = []
-        for mensagens in (data.get("errors") or {}).values():
-            erros.extend(mensagens if isinstance(mensagens, list) else [mensagens])
+        erros = MelhorEnvioClient._flatten(data.get("errors")) or (
+            MelhorEnvioClient._flatten(data.get("error"))
+            if isinstance(data.get("error"), (dict, list)) else []
+        )
         if erros:
-            return "; ".join(str(erro) for erro in erros)
+            return "; ".join(erros)
         return data.get("message") or data.get("error") or ""
 
     # ------------------------------------------------------------------ #
@@ -223,3 +262,74 @@ class MelhorEnvioClient:
             _QUOTE_CACHE.clear()
         _QUOTE_CACHE[chave] = (time.time() + QUOTE_CACHE_TTL_S, response)
         return response
+
+    def add_to_cart(self, payload):
+        """Põe o envio no carrinho. Devolve a etiqueta criada, com o `id` que as
+        demais operações usam. Fica no carrinho 7 dias; sem pagamento, some."""
+        return self._request_json("POST", "/api/v2/me/cart", payload=payload)
+
+    def checkout(self, order_ids):
+        """Paga as etiquetas com o saldo da carteira."""
+        return self._request_json("POST", "/api/v2/me/shipment/checkout",
+                                  payload={"orders": list(order_ids)})
+
+    def generate(self, order_ids):
+        """Gera as etiquetas pagas: a transportadora é avisada e, na Loggi
+        Coleta, a coleta é agendada. Devolve {id: {status, message}}."""
+        return self._request_json("POST", "/api/v2/me/shipment/generate",
+                                  payload={"orders": list(order_ids)})
+
+    def order(self, order_id):
+        return self._request_json("GET", "/api/v2/me/orders/%s" % order_id)
+
+    def orders_for_document(self, document):
+        """Etiquetas em que o CPF/CNPJ é remetente ou destinatário. A busca da
+        API também aceita id, protocolo e rastreio; aqui só o documento."""
+        try:
+            data = self._request_json("GET", "/api/v2/me/orders/search?q=%s" % digits(document))
+        except MelhorEnvioError as error:
+            # nada encontrado vem como erro
+            if error.status_code in (400, 404):
+                return []
+            raise
+        return data if isinstance(data, list) else []
+
+    def label_pdf(self, order_id):
+        """O PDF da etiqueta. A API devolve o endereço do arquivo, que se baixa
+        sem autenticação."""
+        _ = self._
+        data = self._request_json("GET", "/api/v2/me/imprimir/pdf/%s" % order_id)
+        candidatos = []
+        if isinstance(data, str):
+            candidatos = [data]
+        elif isinstance(data, dict):
+            candidatos = [data.get("url")] + list(data.values()) + list(data.keys())
+        elif isinstance(data, list):
+            candidatos = data
+        url = next((str(item).strip().strip('"') for item in candidatos
+                    if isinstance(item, str) and item.strip().strip('"').startswith("http")), None)
+        if not url:
+            raise MelhorEnvioError(_("O Melhor Envio não devolveu o arquivo da etiqueta."))
+        try:
+            response = requests.get(url, timeout=self.timeout)
+        except requests.RequestException as error:
+            raise MelhorEnvioError(_("Não foi possível baixar a etiqueta.")) from error
+        if not response.ok or not response.content.startswith(b"%PDF"):
+            raise MelhorEnvioError(_("O arquivo da etiqueta não é um PDF."))
+        return response.content
+
+    def tracking(self, order_ids):
+        """Status de cada etiqueta: {id: {status, tracking, *_at}}."""
+        return self._request_json("POST", "/api/v2/me/shipment/tracking",
+                                  payload={"orders": list(order_ids)})
+
+    def cancellable(self, order_ids):
+        return self._request_json("POST", "/api/v2/me/shipment/cancellable",
+                                  payload={"orders": list(order_ids)})
+
+    def cancel(self, order_id, description):
+        """Cancela a etiqueta. Já gerada, o estorno cai na carteira em até 12 horas."""
+        return self._request_json("POST", "/api/v2/me/shipment/cancel", payload={
+            "order": {"id": order_id, "reason_id": CANCEL_REASON,
+                      "description": (description or "")[:255]},
+        })

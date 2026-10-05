@@ -49,14 +49,38 @@
                             <field name="melhor_envio_default_package_type_id"/>
                         </group>
                         <group string="Etiqueta">
+                            <field name="melhor_envio_require_nfe"/>
                             <div colspan="2" class="text-muted">
-                                Este método só cota. A etiqueta é comprada no painel do Melhor
-                                Envio; o código de rastreio vai na entrega e o comprador acompanha
-                                pelo Melhor Rastreio.
+                                Com o Nível de integração em <i>Obter taxa e criar remessa</i>,
+                                validar a entrega compra a etiqueta com o saldo da carteira do
+                                Melhor Envio, gera (na Loggi Coleta, agenda a coleta) e anexa o
+                                PDF à entrega. Em <i>Obter preço</i>, só cota: a etiqueta é
+                                comprada no painel.
                             </div>
                         </group>
                     </group>
                 </page>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_picking_form_melhor_envio" model="ir.ui.view">
+        <field name="name">stock.picking.form.melhor.envio</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock_delivery.view_picking_withcarrier_out_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="/form/header/button[last()]" position="after">
+                <button name="action_melhor_envio_finish" type="object"
+                        string="Concluir etiqueta" class="btn-primary"
+                        invisible="delivery_type != 'melhor_envio' or not melhor_envio_order_ids or melhor_envio_status not in (False, 'released')"/>
+                <button name="action_melhor_envio_refresh_tracking" type="object"
+                        string="Atualizar rastreio"
+                        invisible="delivery_type != 'melhor_envio' or not melhor_envio_order_ids"/>
+            </xpath>
+            <xpath expr="//field[@name='carrier_tracking_ref']" position="after">
+                <field name="melhor_envio_order_ids" invisible="1"/>
+                <field name="melhor_envio_status" readonly="1" class="oe_inline ms-2 text-muted"
+                       invisible="not melhor_envio_status"/>
             </xpath>
         </field>
     </record>

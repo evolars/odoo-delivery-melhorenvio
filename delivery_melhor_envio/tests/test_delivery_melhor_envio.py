@@ -53,6 +53,7 @@ QUOTE = [
     service(1, "PAC", 22.10, 6),
     service(2, "SEDEX", 41.50, 2),
     service(3, ".Package", 19.90, 5, company="Jadlog"),
+    service(32, "Coleta", 29.35, 4, company="Loggi"),
     UNAVAILABLE,
 ]
 
@@ -301,10 +302,6 @@ class TestMelhorEnvioRating(MelhorEnvioCarrierCase):
             self.carrier.action_melhor_envio_test_connection()
         self.assertEqual(call.call_args[1]["json"]["from"], {"postal_code": "88036530"})
 
-    def test_shipping_is_not_created_here(self):
-        with self.assertRaises(UserError):
-            self.carrier.send_shipping(self.env["stock.picking"])
-
     def test_tracking_link_uses_melhor_rastreio(self):
         picking = self.env["stock.picking"].new({"carrier_tracking_ref": "AB123456789BR"})
         self.assertEqual(self.carrier.get_tracking_link(picking),
@@ -342,3 +339,237 @@ class TestMelhorEnvioToken(MelhorEnvioCarrierCase):
         aviso = emails.search([], order="id desc", limit=1)
         self.assertIn("Correios econômico", aviso.subject)
         self.assertIn("admin@editora.com.br", aviso.email_to)
+
+
+ORDER_ID = "6d4935c4-cc03-43b4-b8c4-beef6f141e14"
+
+
+class FakeApi:
+    """O Melhor Envio inteiro, por rota. Guarda as chamadas para conferir."""
+
+    def __init__(self, paid=(), checkout_status=200, generate_ok=True, tracking=None,
+                 cancellable=True, bairro="Bela Vista"):
+        self.calls = []
+        self.paid = list(paid)
+        self.checkout_status = checkout_status
+        self.generate_ok = generate_ok
+        self.status = {ORDER_ID: dict({"id": ORDER_ID, "status": "released"}, **(tracking or {}))}
+        self.cancellable_ok = cancellable
+        self.bairro = bairro
+
+    def request(self, method, url, headers=None, json=None, params=None, timeout=None):
+        caminho = url.split("melhorenvio.com.br")[1]
+        self.calls.append((method, caminho, json))
+        if caminho.startswith("/api/v2/me/orders/search"):
+            return FakeResponse(payload=self.paid)
+        if caminho == "/api/v2/me/shipment/calculate":
+            return FakeResponse(payload=QUOTE)
+        if caminho == "/api/v2/me/cart":
+            return FakeResponse(201, {"id": ORDER_ID, "protocol": "ORD-1", "status": "pending"})
+        if caminho == "/api/v2/me/shipment/checkout":
+            if self.checkout_status != 200:
+                return FakeResponse(422, {"message": "Saldo insuficiente."})
+            return FakeResponse(payload={"purchase": {"status": "paid"}})
+        if caminho == "/api/v2/me/shipment/tracking":
+            return FakeResponse(payload=self.status)
+        if caminho == "/api/v2/me/shipment/generate":
+            if not self.generate_ok:
+                return FakeResponse(payload={ORDER_ID: {"status": False,
+                                                        "message": "Volume fora do limite"}})
+            self.status[ORDER_ID]["status"] = "generated"
+            return FakeResponse(payload={ORDER_ID: {"status": True, "message": "ok"}})
+        if caminho == "/api/v2/me/orders/%s" % ORDER_ID:
+            return FakeResponse(payload={"id": ORDER_ID, "protocol": "ORD-1", "price": 29.35,
+                                         "tracking": "LGI123BR", "self_tracking": "ME123BR"})
+        if caminho == "/api/v2/me/imprimir/pdf/%s" % ORDER_ID:
+            return FakeResponse(payload="https://s3.example.com/etiqueta.pdf")
+        if caminho == "/api/v2/me/shipment/cancellable":
+            return FakeResponse(payload={ORDER_ID: {"cancellable": self.cancellable_ok}})
+        if caminho == "/api/v2/me/shipment/cancel":
+            return FakeResponse(payload={ORDER_ID: {"canceled": True}})
+        raise AssertionError("rota não simulada: %s %s" % (method, caminho))
+
+    def get(self, url, timeout=None):
+        if "viacep" in url:
+            return FakeResponse(payload={"bairro": self.bairro} if self.bairro else {"erro": True})
+        resposta = FakeResponse()
+        resposta.content = b"%PDF-1.4 etiqueta"
+        return resposta
+
+    def paths(self):
+        return [caminho for _metodo, caminho, _corpo in self.calls]
+
+    def body(self, caminho):
+        return next(corpo for _metodo, rota, corpo in self.calls if rota == caminho)
+
+
+@tagged("post_install", "-at_install", "delivery_melhor_envio")
+class TestMelhorEnvioShipping(MelhorEnvioCarrierCase):
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.env.company.write({
+            "vat": "66.903.932/0001-52", "phone": "(48) 99830-5099", "name": "Editora Teste",
+        })
+        cls.buyer.write({"vat": "529.982.247-25", "phone": "(11) 98888-7777",
+                         "email": "leitora@example.com"})
+        cls.carrier.write({"integration_level": "rate_and_ship", "melhor_envio_services": "32"})
+
+    def _picking(self, qty=1):
+        order = self.env["sale.order"].create({
+            "partner_id": self.buyer.id, "carrier_id": self.carrier.id,
+            "order_line": [(0, 0, {"product_id": self.book.id, "product_uom_qty": qty,
+                                   "price_unit": 60.0, "tax_id": [(5, 0, 0)]})],
+        })
+        order.action_confirm()
+        picking = order.picking_ids
+        picking.move_ids.quantity = qty
+        return picking
+
+    def _ship(self, picking, api):
+        with patch.object(requests, "request", side_effect=api.request), \
+                patch.object(requests, "get", side_effect=api.get):
+            return self.carrier.send_shipping(picking)[0]
+
+    def test_buys_pays_generates_and_attaches_the_label(self):
+        picking = self._picking()
+        api = FakeApi()
+        resultado = self._ship(picking, api)
+
+        self.assertEqual(resultado, {"exact_price": 29.35, "tracking_number": "LGI123BR"})
+        self.assertEqual(picking.melhor_envio_order_ids, ORDER_ID)
+        self.assertEqual(picking.melhor_envio_protocol, "ORD-1")
+        self.assertEqual(picking.melhor_envio_status, "generated")
+        self.assertEqual(api.paths().count("/api/v2/me/shipment/checkout"), 1)
+        etiqueta = self.env["ir.attachment"].search([
+            ("res_model", "=", "stock.picking"), ("res_id", "=", picking.id)])
+        self.assertEqual(len(etiqueta), 1)
+        self.assertTrue(etiqueta.raw.startswith(b"%PDF"))
+
+    def test_cart_payload(self):
+        picking = self._picking()
+        api = FakeApi()
+        self._ship(picking, api)
+        corpo = api.body("/api/v2/me/cart")
+        self.assertEqual(corpo["service"], 32)
+        remetente, destinatario = corpo["from"], corpo["to"]
+        self.assertEqual(remetente["name"], "Editora Teste")
+        self.assertEqual(remetente["company_document"], "66903932000152")
+        self.assertEqual(remetente["postal_code"], "88010000")
+        self.assertEqual((remetente["address"], remetente["number"]), ("Rua Felipe Schmidt", "10"))
+        self.assertEqual(destinatario["document"], "52998224725")
+        self.assertEqual((destinatario["address"], destinatario["number"]),
+                         ("Av. Paulista", "1000"))
+        self.assertEqual(destinatario["district"], "Bela Vista", "bairro pelo CEP (ViaCEP)")
+        self.assertEqual(destinatario["phone"], "11988887777")
+        self.assertEqual(corpo["volumes"], [{"width": 17, "height": 5, "length": 24,
+                                             "weight": 0.38}])
+        self.assertEqual(corpo["products"], [{"name": "Livro", "quantity": 1,
+                                              "unitary_value": 60.0}])
+        opcoes = corpo["options"]
+        self.assertEqual(opcoes["insurance_value"], 60.0)
+        self.assertTrue(opcoes["non_commercial"], "sem a localização fiscal não há NF-e")
+        self.assertEqual(opcoes["tags"], [{"tag": picking.name, "url": None}])
+
+    def test_already_paid_label_is_not_bought_again(self):
+        """A validação caiu depois do pagamento: a etiqueta paga é reaproveitada."""
+        picking = self._picking()
+        api = FakeApi(paid=[{"id": ORDER_ID, "status": "released",
+                             "tags": [{"tag": picking.name}]},
+                            {"id": "outra", "status": "released", "tags": [{"tag": "OUTRA"}]}])
+        resultado = self._ship(picking, api)
+        self.assertNotIn("/api/v2/me/cart", api.paths())
+        self.assertNotIn("/api/v2/me/shipment/checkout", api.paths())
+        self.assertEqual(picking.melhor_envio_order_ids, ORDER_ID)
+        self.assertEqual(resultado["tracking_number"], "LGI123BR")
+
+    def test_payment_refused_stops_before_anything_is_stored(self):
+        picking = self._picking()
+        with self.assertRaises(MelhorEnvioError) as caught:
+            self._ship(picking, FakeApi(checkout_status=422))
+        self.assertIn("saldo", str(caught.exception))
+        self.assertFalse(picking.melhor_envio_order_ids)
+
+    def test_failure_after_payment_does_not_raise(self):
+        """Pago e não gerado: aviso na entrega e o botão termina depois."""
+        picking = self._picking()
+        resultado = self._ship(picking, FakeApi(generate_ok=False))
+        self.assertFalse(resultado["tracking_number"])
+        self.assertEqual(picking.melhor_envio_order_ids, ORDER_ID)
+        self.assertIn("Volume fora do limite", picking.message_ids[0].body)
+        self.assertTrue(picking.activity_ids)
+
+        api = FakeApi()
+        with patch.object(requests, "request", side_effect=api.request), \
+                patch.object(requests, "get", side_effect=api.get):
+            picking.action_melhor_envio_finish()
+        self.assertNotIn("/api/v2/me/shipment/checkout", api.paths(), "não paga de novo")
+        self.assertEqual(picking.carrier_tracking_ref, "LGI123BR")
+
+    def test_nfe_required_blocks_before_the_cart(self):
+        picking = self._picking()
+        api = FakeApi()
+        with patch.object(type(self.carrier), "_melhor_envio_requires_nfe", return_value=True):
+            with self.assertRaises(MelhorEnvioError) as caught:
+                self._ship(picking, api)
+        self.assertIn("NF-e", str(caught.exception))
+        self.assertNotIn("/api/v2/me/cart", api.paths())
+
+    def test_address_without_district_is_reported(self):
+        picking = self._picking()
+        with self.assertRaises(MelhorEnvioError) as caught:
+            self._ship(picking, FakeApi(bairro=""))
+        self.assertIn("bairro", str(caught.exception))
+
+    def test_street_number_is_split_from_the_street(self):
+        casos = {
+            "Av. Paulista, 1000": ("Av. Paulista", "1000"),
+            "Rua das Flores 12A": ("Rua das Flores", "12A"),
+            "Rua Bocaiúva, nº 1003": ("Rua Bocaiúva", "1003"),
+            "Estrada Geral": ("Estrada Geral", "S/N"),
+        }
+        for rua, esperado in casos.items():
+            parceiro = self.env["res.partner"].new({"name": "X", "street": rua})
+            self.assertEqual(self.carrier._melhor_envio_street(parceiro), esperado, rua)
+
+    def test_tracking_fills_code_milestones_and_delivery(self):
+        picking = self._picking()
+        picking.write({"melhor_envio_order_ids": ORDER_ID, "carrier_tracking_ref": False})
+        api = FakeApi(tracking={
+            "status": "delivered", "tracking": "LGI123BR",
+            "generated_at": "2026-10-06 10:00:00", "posted_at": "2026-10-06 15:20:00",
+            "delivered_at": "2026-10-09 11:05:00",
+        })
+        with patch.object(requests, "request", side_effect=api.request):
+            picking.action_melhor_envio_refresh_tracking()
+        self.assertEqual(picking.carrier_tracking_ref, "LGI123BR")
+        self.assertEqual(picking.melhor_envio_status, "delivered")
+        self.assertTrue(picking.melhor_envio_delivered)
+        eventos = picking.melhor_envio_tracking_events
+        self.assertEqual([e["description"] for e in eventos],
+                         ["Entregue", "Coletado pela transportadora",
+                          "Etiqueta gerada; coleta agendada"])
+        self.assertEqual((eventos[0]["date"], eventos[0]["time"]), ("2026-10-09", "11:05"))
+
+    def test_cancel(self):
+        picking = self._picking()
+        api = FakeApi()
+        self._ship(picking, api)
+        with patch.object(requests, "request", side_effect=api.request):
+            self.carrier.cancel_shipment(picking)
+        self.assertIn("/api/v2/me/shipment/cancel", api.paths())
+        self.assertFalse(picking.melhor_envio_order_ids)
+        self.assertEqual(picking.melhor_envio_status, "canceled")
+        etiqueta = self.env["ir.attachment"].search([
+            ("res_model", "=", "stock.picking"), ("res_id", "=", picking.id)])
+        self.assertTrue(etiqueta.name.startswith("CANCELADA-"))
+
+    def test_cancel_refused_after_pickup_was_requested(self):
+        picking = self._picking()
+        picking.melhor_envio_order_ids = ORDER_ID
+        with patch.object(requests, "request", side_effect=FakeApi(cancellable=False).request):
+            with self.assertRaises(MelhorEnvioError):
+                self.carrier.cancel_shipment(picking)
+        self.assertEqual(picking.melhor_envio_order_ids, ORDER_ID)
+
