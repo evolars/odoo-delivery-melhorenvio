@@ -1,6 +1,6 @@
 {
     "name": "Melhor Envio - Frete Nacional",
-    "version": "18.0.1.0.0",
+    "version": "18.0.1.0.1",
     "category": "Inventory/Delivery",
     "summary": "Cotação de frete no checkout pelo Melhor Envio (Correios, Jadlog e outras)",
     "description": """

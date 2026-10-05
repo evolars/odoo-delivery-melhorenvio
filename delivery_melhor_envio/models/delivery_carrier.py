@@ -116,13 +116,17 @@ class DeliveryCarrier(models.Model):
         )
 
     def _melhor_envio_origin_partner(self, order=None, picking=None):
-        """De onde o pacote sai: o endereço do depósito, ou o da empresa."""
+        """De onde o pacote sai: o endereço do depósito, ou o da empresa. Sem
+        pedido (o botão de teste), o depósito principal da empresa."""
         if picking and picking.picking_type_id.warehouse_id.partner_id:
             return picking.picking_type_id.warehouse_id.partner_id
         if order and order.warehouse_id.partner_id:
             return order.warehouse_id.partner_id
         company = (order or picking or self).company_id or self.env.company
-        return company.partner_id
+        deposito = self.env["stock.warehouse"].sudo().search(
+            [("company_id", "=", company.id)], limit=1,
+        )
+        return deposito.partner_id or company.partner_id
 
     def _match(self, partner, order):
         """O Melhor Envio só entrega dentro do Brasil."""

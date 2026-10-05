@@ -97,7 +97,7 @@ odoo -d <db> -i delivery_melhor_envio --test-enable --test-tags /delivery_melhor
     --stop-after-init --http-port 8099
 ```
 
-25 testes, com a API simulada: cabeçalhos e corpo da cotação, cache entre métodos, erros (token,
+26 testes, com a API simulada: cabeçalhos e corpo da cotação, cache entre métodos, erros (token,
 validação, conexão), escolha do serviço, caixa e valor declarado, origem pelo depósito, só Brasil,
 sandbox, link do Melhor Rastreio e o aviso de vencimento do token.
 

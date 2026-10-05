@@ -289,6 +289,18 @@ class TestMelhorEnvioRating(MelhorEnvioCarrierCase):
         self.assertIn("PAC", mensagem)
         self.assertIn("SEDEX", mensagem)
 
+    def test_test_button_quotes_from_the_warehouse(self):
+        """Sem pedido, a origem é o depósito, não o endereço da empresa."""
+        expedicao = self.env["res.partner"].create({
+            "name": "Expedição", "parent_id": self.env.company.partner_id.id,
+            "type": "delivery", "zip": "88036-530", "country_id": self.env.ref("base.br").id,
+        })
+        self.env["stock.warehouse"].search(
+            [("company_id", "=", self.env.company.id)], limit=1).partner_id = expedicao
+        with patch.object(requests, "request", return_value=FakeResponse(payload=QUOTE)) as call:
+            self.carrier.action_melhor_envio_test_connection()
+        self.assertEqual(call.call_args[1]["json"]["from"], {"postal_code": "88036530"})
+
     def test_shipping_is_not_created_here(self):
         with self.assertRaises(UserError):
             self.carrier.send_shipping(self.env["stock.picking"])
