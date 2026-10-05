@@ -347,10 +347,9 @@ ORDER_ID = "6d4935c4-cc03-43b4-b8c4-beef6f141e14"
 class FakeApi:
     """O Melhor Envio inteiro, por rota. Guarda as chamadas para conferir."""
 
-    def __init__(self, paid=(), checkout_status=200, generate_ok=True, tracking=None,
+    def __init__(self, checkout_status=200, generate_ok=True, tracking=None,
                  cancellable=True, bairro="Bela Vista"):
         self.calls = []
-        self.paid = list(paid)
         self.checkout_status = checkout_status
         self.generate_ok = generate_ok
         self.status = {ORDER_ID: dict({"id": ORDER_ID, "status": "released"}, **(tracking or {}))}
@@ -360,8 +359,6 @@ class FakeApi:
     def request(self, method, url, headers=None, json=None, params=None, timeout=None):
         caminho = url.split("melhorenvio.com.br")[1]
         self.calls.append((method, caminho, json))
-        if caminho.startswith("/api/v2/me/orders/search"):
-            return FakeResponse(payload=self.paid)
         if caminho == "/api/v2/me/shipment/calculate":
             return FakeResponse(payload=QUOTE)
         if caminho == "/api/v2/me/cart":
@@ -472,12 +469,17 @@ class TestMelhorEnvioShipping(MelhorEnvioCarrierCase):
         self.assertTrue(opcoes["non_commercial"], "sem a localização fiscal não há NF-e")
         self.assertEqual(opcoes["tags"], [{"tag": picking.name, "url": None}])
 
+    def test_paid_label_is_saved_outside_the_validation(self):
+        picking = self._picking()
+        self._ship(picking, FakeApi())
+        pago = self.env["melhor.envio.paid"].search([("picking_ref", "=", picking.id)])
+        self.assertEqual(pago.order_ids, ORDER_ID)
+
     def test_already_paid_label_is_not_bought_again(self):
         """A validação caiu depois do pagamento: a etiqueta paga é reaproveitada."""
         picking = self._picking()
-        api = FakeApi(paid=[{"id": ORDER_ID, "status": "released",
-                             "tags": [{"tag": picking.name}]},
-                            {"id": "outra", "status": "released", "tags": [{"tag": "OUTRA"}]}])
+        self.env["melhor.envio.paid"].create({"picking_ref": picking.id, "order_ids": ORDER_ID})
+        api = FakeApi()
         resultado = self._ship(picking, api)
         self.assertNotIn("/api/v2/me/cart", api.paths())
         self.assertNotIn("/api/v2/me/shipment/checkout", api.paths())
@@ -506,6 +508,16 @@ class TestMelhorEnvioShipping(MelhorEnvioCarrierCase):
             picking.action_melhor_envio_finish()
         self.assertNotIn("/api/v2/me/shipment/checkout", api.paths(), "não paga de novo")
         self.assertEqual(picking.carrier_tracking_ref, "LGI123BR")
+
+    def test_no_label_before_the_planned_day(self):
+        """A coleta é agendada ao gerar a etiqueta: antes do dia, não compra."""
+        picking = self._picking()
+        picking.scheduled_date = fields.Datetime.now() + timedelta(days=3)
+        api = FakeApi()
+        with self.assertRaises(MelhorEnvioError) as caught:
+            self._ship(picking, api)
+        self.assertIn("11h", str(caught.exception))
+        self.assertNotIn("/api/v2/me/cart", api.paths())
 
     def test_nfe_required_blocks_before_the_cart(self):
         picking = self._picking()
@@ -560,6 +572,8 @@ class TestMelhorEnvioShipping(MelhorEnvioCarrierCase):
             self.carrier.cancel_shipment(picking)
         self.assertIn("/api/v2/me/shipment/cancel", api.paths())
         self.assertFalse(picking.melhor_envio_order_ids)
+        self.assertFalse(self.env["melhor.envio.paid"].search([("picking_ref", "=", picking.id)]),
+                         "cancelada, a entrega pode comprar outra")
         self.assertEqual(picking.melhor_envio_status, "canceled")
         etiqueta = self.env["ir.attachment"].search([
             ("res_model", "=", "stock.picking"), ("res_id", "=", picking.id)])

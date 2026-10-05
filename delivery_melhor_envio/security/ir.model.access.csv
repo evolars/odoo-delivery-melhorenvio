@@ -1,0 +1,3 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_melhor_envio_paid_system,melhor.envio.paid,model_melhor_envio_paid,base.group_system,1,1,1,1
+access_melhor_envio_paid_stock,melhor.envio.paid stock,model_melhor_envio_paid,stock.group_stock_user,1,0,0,0

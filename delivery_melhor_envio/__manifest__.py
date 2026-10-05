@@ -1,6 +1,6 @@
 {
     "name": "Melhor Envio - Frete Nacional",
-    "version": "18.0.1.1.0",
+    "version": "18.0.1.2.0",
     "category": "Inventory/Delivery",
     "summary": "Cotação no checkout e etiqueta pelo Melhor Envio (Correios, Loggi e outras)",
     "description": """
@@ -29,6 +29,7 @@ etiqueta ao validar a entrega:
     "depends": ["stock_delivery"],
     "external_dependencies": {"python": ["requests"]},
     "data": [
+        "security/ir.model.access.csv",
         "data/ir_cron.xml",
         "views/delivery_melhor_envio_views.xml",
     ],

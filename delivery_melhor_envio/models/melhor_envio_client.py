@@ -282,18 +282,6 @@ class MelhorEnvioClient:
     def order(self, order_id):
         return self._request_json("GET", "/api/v2/me/orders/%s" % order_id)
 
-    def orders_for_document(self, document):
-        """Etiquetas em que o CPF/CNPJ é remetente ou destinatário. A busca da
-        API também aceita id, protocolo e rastreio; aqui só o documento."""
-        try:
-            data = self._request_json("GET", "/api/v2/me/orders/search?q=%s" % digits(document))
-        except MelhorEnvioError as error:
-            # nada encontrado vem como erro
-            if error.status_code in (400, 404):
-                return []
-            raise
-        return data if isinstance(data, list) else []
-
     def label_pdf(self, order_id):
         """O PDF da etiqueta. A API devolve o endereço do arquivo, que se baixa
         sem autenticação."""

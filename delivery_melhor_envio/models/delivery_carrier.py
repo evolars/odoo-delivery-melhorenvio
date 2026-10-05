@@ -6,7 +6,8 @@ from datetime import timedelta
 
 from markupsafe import Markup
 
-from odoo import api, fields, models
+import odoo
+from odoo import SUPERUSER_ID, api, fields, models
 from odoo.exceptions import UserError
 from odoo.tools import format_amount, format_date
 
@@ -43,10 +44,6 @@ MAX_PRODUCT_NAME = 255
 
 # "Rua X, 123", "Rua X 123", "Rua X, nº 123": o número no fim da linha.
 STREET_NUMBER = re.compile(r"^(?P<rua>.*?)[,\s]+(?:n[º°o.]*\s*)?(?P<numero>\d+[a-zA-Z]?)\s*$")
-
-# Etiqueta paga e ainda não cancelada: as que não podem ser compradas de novo.
-PAID_STATUSES = ("released", "generated", "received", "posted", "delivered",
-                 "undelivered", "paused", "suspended")
 
 
 def ceil_int(value):
@@ -488,43 +485,57 @@ class DeliveryCarrier(models.Model):
             ))
         return opcao
 
-    def _melhor_envio_paid_orders(self, client, picking):
-        """Etiquetas desta entrega já pagas no Melhor Envio.
+    def _melhor_envio_save_paid(self, picking, ids):
+        """Grava as etiquetas pagas numa transação própria: se a validação for
+        desfeita depois do pagamento, o registro fica, e a próxima tentativa
+        reaproveita a etiqueta em vez de pagar outra."""
+        valores = {"picking_ref": picking.id, "order_ids": ",".join(ids)}
+        if odoo.modules.module.current_test:
+            self.env["melhor.envio.paid"].sudo().create(valores)
+            return
+        with self.env.registry.cursor() as cr:
+            api.Environment(cr, SUPERUSER_ID, {})["melhor.envio.paid"].create(valores)
 
-        Se a validação da entrega falhar depois do pagamento, o Odoo desfaz tudo,
-        inclusive o registro da etiqueta; a etiqueta paga continua lá. Antes de
-        comprar, procura-se pela entrega (a busca é pelo CPF/CNPJ do destinatário,
-        filtrada pela etiqueta com o nome da entrega) para não pagar duas vezes.
-        """
-        documento = digits(picking.partner_id.commercial_partner_id.vat)
-        if not documento:
-            return []
-        return [
-            pedido for pedido in client.orders_for_document(documento)
-            if pedido.get("status") in PAID_STATUSES
-            and any((tag or {}).get("tag") == picking.name for tag in pedido.get("tags") or [])
-        ]
+    def _melhor_envio_saved_paid(self, picking):
+        pago = self.env["melhor.envio.paid"].sudo().search(
+            [("picking_ref", "=", picking.id)], limit=1)
+        return pago.order_ids or False
+
+    def _melhor_envio_check_date(self, picking):
+        """A coleta é agendada quando a etiqueta é gerada: não se compra antes do
+        dia previsto da entrega (na pré-venda, o "Envio a partir de")."""
+        if not picking.scheduled_date:
+            return
+        previsto = fields.Datetime.context_timestamp(self, picking.scheduled_date).date()
+        if previsto > fields.Date.context_today(self):
+            raise MelhorEnvioError(self.env._(
+                "A entrega %(entrega)s está prevista para %(data)s. A coleta é agendada no "
+                "momento em que a etiqueta é gerada: valide a entrega nesse dia (antes das "
+                "11h, para a coleta sair no mesmo dia).",
+                entrega=picking.name, data=format_date(self.env, previsto),
+            ))
 
     def melhor_envio_send_shipping(self, pickings):
         """Compra, paga e gera a etiqueta de cada entrega, e anexa o PDF.
 
-        Até o pagamento, qualquer recusa volta como erro e a validação não
-        acontece. Depois dele o dinheiro já saiu: falhas viram aviso na entrega,
-        nunca erro, e *Concluir etiqueta* termina o que faltou.
+        Antes do dia previsto da entrega, não compra: a coleta seria agendada
+        antes da hora. Até o pagamento, qualquer recusa volta como erro e a
+        validação não acontece. Depois dele o dinheiro já saiu: as etiquetas são
+        gravadas fora da validação, falhas viram aviso na entrega, nunca erro, e
+        *Concluir etiqueta* termina o que faltou.
         """
         self.ensure_one()
         _ = self.env._
         client = self._melhor_envio_get_client()
         resultado = []
         for picking in pickings:
-            pagos = [] if picking.melhor_envio_order_ids else self._melhor_envio_paid_orders(
-                client, picking)
-            if pagos:
-                picking.melhor_envio_order_ids = ",".join(pedido["id"] for pedido in pagos)
+            if not picking.melhor_envio_order_ids:
+                picking.melhor_envio_order_ids = self._melhor_envio_saved_paid(picking)
             if picking.melhor_envio_order_ids:
                 resultado.append(self._melhor_envio_finish(client, picking))
                 continue
 
+            self._melhor_envio_check_date(picking)
             nfe = self._melhor_envio_nfe(picking)
             if not nfe and self._melhor_envio_requires_nfe(picking.company_id):
                 raise MelhorEnvioError(_(
@@ -549,6 +560,7 @@ class DeliveryCarrier(models.Model):
                     "O Melhor Envio não aceitou o pagamento da etiqueta: %s Confira o saldo "
                     "da carteira no painel do Melhor Envio.", str(error),
                 )) from error
+            self._melhor_envio_save_paid(picking, ids)
             picking.melhor_envio_order_ids = ",".join(ids)
             resultado.append(self._melhor_envio_finish(client, picking))
         return resultado
@@ -665,6 +677,8 @@ class DeliveryCarrier(models.Model):
             for etiqueta in etiquetas:
                 etiqueta.name = "CANCELADA-%s" % etiqueta.name
             picking.write({"melhor_envio_order_ids": False, "melhor_envio_status": "canceled"})
+            self.env["melhor.envio.paid"].sudo().search(
+                [("picking_ref", "=", picking.id)]).unlink()
             picking.message_post(body=_(
                 "Etiqueta do Melhor Envio cancelada; o valor volta à carteira em até 12 horas. "
                 "Para despachar de novo, use Enviar para a transportadora."

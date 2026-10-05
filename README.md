@@ -110,10 +110,14 @@ Validar a entrega (com *Obter taxa e criar remessa*):
    agendada. Pega o código de rastreio e **anexa o PDF** da etiqueta (e o DANFE e o XML da NF-e,
    havendo) à entrega.
 
+**Antes do dia previsto da entrega** (na pré-venda, o "Envio a partir de") a etiqueta não é
+comprada: a coleta seria agendada antes da hora.
+
 Depois do pagamento o dinheiro já saiu: falha na geração ou no PDF não desfaz a validação. Vira
-aviso e atividade na entrega, e **Concluir etiqueta** termina sem pagar de novo. Se a validação
-cair por outro motivo depois do pagamento, a próxima procura a etiqueta paga no Melhor Envio
-(pelo CPF/CNPJ do destinatário e o nome da entrega) e a reaproveita.
+aviso e atividade na entrega, e **Concluir etiqueta** termina sem pagar de novo. As etiquetas
+pagas são gravadas numa transação própria (`melhor.envio.paid`) logo depois do pagamento: se a
+validação cair por outro motivo, a próxima tentativa reaproveita a etiqueta em vez de pagar
+outra. (A busca da API não acha etiqueta pela marca da entrega, conferido em 05/10/2026.)
 
 **Rastreio.** O Melhor Envio não repassa os eventos da transportadora, só os marcos: etiqueta
 gerada, coletado (postado), entregue, cancelado. A tarefa *Melhor Envio: atualizar rastreio*
@@ -134,11 +138,11 @@ odoo -d <db> -i delivery_melhor_envio --test-enable --test-tags /delivery_melhor
     --stop-after-init --http-port 8099
 ```
 
-36 testes, com a API simulada: cabeçalhos e corpo da cotação, cache entre métodos, erros (token,
+38 testes, com a API simulada: cabeçalhos e corpo da cotação, cache entre métodos, erros (token,
 validação, conexão), escolha do serviço, caixa e valor declarado, origem pelo depósito, só Brasil,
 sandbox, link do Melhor Rastreio, aviso de vencimento do token e a etiqueta: compra, pagamento,
-geração e PDF, corpo do carrinho, etiqueta paga reaproveitada, pagamento recusado, falha depois
-de pagar, NF-e exigida, bairro, número da rua, rastreio e cancelamento.
+geração e PDF, corpo do carrinho, etiqueta paga gravada e reaproveitada, nada antes do dia
+previsto, pagamento recusado, falha depois de pagar, NF-e exigida, bairro, número da rua, rastreio e cancelamento.
 
 Referência: [documentação da API](https://docs.melhorenvio.com.br) (cálculo, carrinho, compra,
 geração, impressão, status e cancelamento atualizados em 18/06/2026, conferidos em 05/10/2026).
