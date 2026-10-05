@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="view_delivery_carrier_form_melhor_envio" model="ir.ui.view">
+        <field name="name">delivery.carrier.form.melhor.envio</field>
+        <field name="model">delivery.carrier</field>
+        <field name="inherit_id" ref="delivery.view_delivery_carrier_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//notebook" position="inside">
+                <page string="Melhor Envio" name="melhor_envio"
+                      invisible="delivery_type != 'melhor_envio'">
+                    <group>
+                        <div colspan="2" class="alert alert-warning" role="alert"
+                             invisible="not melhor_envio_token_expiring">
+                            O token vence em <field name="melhor_envio_token_expiry" class="oe_inline"
+                                                    readonly="1"/>. Sem token válido o frete não é
+                            cotado e o método some do checkout: gere outro no painel do Melhor
+                            Envio.
+                        </div>
+                    </group>
+                    <group>
+                        <group string="Credenciais">
+                            <field name="melhor_envio_token" password="True"/>
+                            <field name="melhor_envio_token_expiry" readonly="1"
+                                   invisible="not melhor_envio_token_expiry"/>
+                            <field name="melhor_envio_contact_email" placeholder="ti@empresa.com.br"/>
+                            <button name="action_melhor_envio_test_connection" type="object"
+                                    string="Testar cotação" class="btn-link ps-0"
+                                    icon="fa-plug" colspan="2"/>
+                            <div colspan="2" class="text-muted">
+                                Token: painel do Melhor Envio → Integrações → Permissões de
+                                acesso → Gerar novo token. O ambiente segue o campo
+                                <i>Ambiente</i> acima: fora de produção as chamadas vão para o
+                                sandbox, que tem cadastro e token próprios.
+                            </div>
+                        </group>
+                        <group string="Serviço">
+                            <field name="melhor_envio_services" placeholder="1,17"/>
+                            <field name="melhor_envio_choice" widget="radio"/>
+                            <div colspan="2" class="text-muted">
+                                Correios: 1 PAC, 2 SEDEX, 17 Mini Envios. Jadlog: 3 .Package,
+                                4 .Com. Vazio: qualquer serviço que o Melhor Envio cotar.
+                            </div>
+                        </group>
+                    </group>
+                    <group>
+                        <group string="Embalagem">
+                            <field name="melhor_envio_package_type_ids" widget="many2many_tags"/>
+                            <field name="melhor_envio_default_package_type_id"/>
+                        </group>
+                        <group string="Etiqueta">
+                            <div colspan="2" class="text-muted">
+                                Este método só cota. A etiqueta é comprada no painel do Melhor
+                                Envio; o código de rastreio vai na entrega e o comprador acompanha
+                                pelo Melhor Rastreio.
+                            </div>
+                        </group>
+                    </group>
+                </page>
+            </xpath>
+        </field>
+    </record>
+
+</odoo>
