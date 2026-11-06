@@ -2,6 +2,7 @@ import base64
 import logging
 import math
 import re
+import time
 from datetime import timedelta
 
 from markupsafe import Markup
@@ -573,11 +574,14 @@ class DeliveryCarrier(models.Model):
         preco, rastreios, protocolos = 0.0, [], []
         try:
             situacao = client.tracking(ids)
-            gerar = [i for i in ids if (situacao.get(i) or {}).get("status") == "released"]
+            # Gerada, a etiqueta continua "released"; o que muda é o generated_at.
+            gerar = [i for i in ids if (situacao.get(i) or {}).get("status") == "released"
+                     and not (situacao.get(i) or {}).get("generated_at")]
             if gerar:
                 for chave, retorno in (client.generate(gerar) or {}).items():
                     if isinstance(retorno, dict) and retorno.get("status") is False:
                         raise MelhorEnvioError(retorno.get("message") or chave)
+                self._melhor_envio_wait_generated(client, gerar)
             for i in ids:
                 pedido = client.order(i)
                 preco += float(pedido.get("price") or 0.0)
@@ -603,6 +607,14 @@ class DeliveryCarrier(models.Model):
                 user_id=picking.user_id.id or self.env.user.id,
             )
         return {"exact_price": preco, "tracking_number": ",".join(rastreios) or False}
+
+    def _melhor_envio_wait_generated(self, client, ids, tentativas=10, intervalo=3):
+        """A geração é assíncrona: o PDF só sai depois do generated_at (até ~20 s)."""
+        for _tentativa in range(tentativas):
+            situacao = client.tracking(ids) or {}
+            if all((situacao.get(i) or {}).get("generated_at") for i in ids):
+                return
+            time.sleep(intervalo)
 
     def _melhor_envio_attach_labels(self, client, picking, ids):
         """Etiqueta em PDF e, havendo, DANFE e XML da NF-e, que vão no pacote."""
